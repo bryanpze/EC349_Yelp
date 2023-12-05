@@ -1,0 +1,341 @@
+---
+title: "EC349 Assignment: Predicting Stars on Yelp"
+author: "Bryan Pek u2100397"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE, message = FALSE)
+```
+
+## Tabula Statement
+We're part of an academic community at Warwick.
+
+Whether studying, teaching, or researching, we’re all taking part in an expert conversation which must meet standards of academic integrity. When we all meet these standards, we can take pride in our own academic achievements, as individuals and as an academic community.
+
+Academic integrity means committing to honesty in academic work, giving credit where we've used others' ideas and being proud of our own achievements.
+
+In submitting my work I confirm that:
+
+1. I have read the guidance on academic integrity provided in the Student Handbook and understand the University regulations in relation to Academic Integrity. I am aware of the potential consequences of Academic Misconduct.
+
+2. I declare that the work is all my own, except where I have stated otherwise.
+
+3. No substantial part(s) of the work submitted here has also been submitted by me in other credit bearing assessments courses of study (other than in certain cases of a resubmission of a piece of work), and I acknowledge that if this has been done this may lead to an appropriate sanction.
+
+4. Where a generative Artificial Intelligence such as ChatGPT has been used I confirm I have abided by both the University guidance and specific requirements as set out in the Student Handbook and the Assessment brief. I have clearly acknowledged the use of any generative Artificial Intelligence in my submission, my reasoning for using it and which generative AI (or AIs) I have used. Except where indicated the work is otherwise entirely my own.
+
+5. I understand that should this piece of work raise concerns requiring investigation in relation to any of points above, it is possible that other work I have submitted for assessment will be checked, even if marks (provisional or confirmed) have been published.
+
+6. Where a proof-reader, paid or unpaid was used, I confirm that the proofreader was made aware of and has complied with the University’s proofreading policy.
+
+7. I consent that my work may be submitted to Turnitin or other analytical technology. I understand the use of this service (or similar), along with other methods of maintaining the integrity of the academic process, will help the University uphold academic standards and assessment fairness.
+
+Privacy statement
+
+The data on this form relates to your submission of coursework. The date and time of your submission, your identity, and the work you have submitted will be stored. We will only use this data to administer and record your coursework submission.
+
+Related articles
+
+[Reg. 11 Academic Integrity (from 4 Oct 2021)](https://warwick.ac.uk/services/gov/calendar/section2/regulations/academic_integrity/)
+
+[Guidance on Regulation 11](https://warwick.ac.uk/services/aro/dar/quality/az/acintegrity/framework/guidancereg11/)
+
+[Proofreading Policy](https://warwick.ac.uk/services/aro/dar/quality/categories/examinations/policies/v_proofreading/)
+
+[Education Policy and Quality Team](https://warwick.ac.uk/services/aro/dar/quality/az/acintegrity/framework/guidancereg11/)
+
+[Academic Integrity (warwick.ac.uk)](Academic Integrity (warwick.ac.uk))
+
+## Introduction
+This project adopts the CRISP-DM methodology. As this is a personal project, minimal stakeholder input is required. The methodology offers a structured, iterative approach for discovering insights in the data mining cycle, essential for generating the relevant features for the model. One difficult challenge encountered was determining whether the problem at hand was a regression or classification problem. Whilst the response variable ("Stars") is an integer with a fixed range of values (1-5), treating the task as a classification problem neglects the ordinal relationship between the "Stars" given. In contrast, adopting a regression approach leads to fitted values falling outside the possible range of "Stars". The project resolves this dilemma by employing Decision Tree and Random Forest regression models, which inherently account for the ordinal nature of the star ratings while capturing the non-linear relationships of the data.
+
+## Business Understanding
+The primary objective of this project is to develop a predictive model that successfully predicts the stars given by a user to a business. The success of this project relies on the model's ability to generalize well to unseen data. Specifically, this project involves splitting the data into training and testing subsets, training the model on the former and assessing the performance of the latter. The chosen evaluation metric for this regression task is the Mean Squared Error which is suitable when dealing with limited and discrete star ratings in the range of 1 to 5.
+
+## Data Understanding
+This project starts with the hypothesis that the predictors that may be insightful in predicting the star rating are sourced from data about the review itself, data about the person writing the review and data about the business that the review is targeted towards.
+```{r include = FALSE}
+library(ggplot2)    
+library(jsonlite)
+library(dplyr)
+library(reshape2)
+library(tm)
+library(tidytext)
+library(wordcloud)
+library(caTools)
+library(recipes)
+library(textrecipes)
+library(caret)
+library(rpart) 
+library(rpart.plot)
+library(ranger)
+load('yelp_review_small.Rda')
+load('yelp_user_small.Rda')
+business_data <- readRDS('./yelp_academic_dataset_business.rds')
+```
+### Review Data
+
+Stars distribution is skewed towards the two polar opposites with the majority of reviews having high ratings. This suggests that customers with exceptionally positive or negative experiences are more inclined to leave reviews, creating an extreme-focused distribution and a lower frequency in the middle range.
+
+``` {r echo=FALSE}
+ggplot(review_data_small, aes(x = stars)) + geom_histogram(binwidth = 1, fill = "skyblue", color = "black") + geom_text(stat="count", aes(label = paste(after_stat(count), " (", sprintf("%.1f%%", after_stat(count)/sum(after_stat(count))*100), ")", sep = "")), position = position_stack(vjust = 0.5), color = "black", size = 3) + labs(title = "Distribution of Stars",x = "Stars",y = "Number Of Reviews")
+
+```
+
+Correlation heatmap for the review dataset
+
+```{r echo=FALSE}
+cor_matrix <- cor(select(review_data_small, stars, useful, funny, cool))%>%melt()
+ggplot(data=cor_matrix, aes(x = Var1, y = Var2, fill = value)) + geom_tile() + labs(title = "Review Data Correlation Heatmap",x = "Variable 1",y = "Variable 2")
+
+```
+
+There is a consistent rise in the number of reviews each year leading up to 2020. The decline in the number of reviews in 2020 aligns with the impact of COVID-19 pandemic, encompassing factors such as lockdowns, business closures and shifts in consumer behavior. The number of reviews is seen to rebounded in the year after attributing the decline of the pandemic. Dataset for the year 2022 appears to have a small number of reviews, indicating an incomplete dataset.
+
+``` {r echo=FALSE}
+review_data_small$date<-as.Date(review_data_small$date)
+review_data_small$year<-format(review_data_small$date,"%Y")
+review_data_small$month<-format(review_data_small$date,"%m")
+reviews_per_year<-review_data_small %>% group_by(year) %>% summarise(num_reviews=n())
+reviews_per_month<-review_data_small %>% group_by(month) %>% summarise(num_reviews=n())
+avg_stars_per_year<-review_data_small %>% group_by(year) %>% summarise(avg_stars=mean(stars))
+avg_stars_per_month<-review_data_small %>% group_by(month) %>% summarise(avg_stars=mean(stars))
+par(mfrow=c(2,2))
+ggplot(reviews_per_year,aes(x = year,y = num_reviews, fill=year)) + geom_bar(stat = "identity") + labs(title="Number Of Reviews Each Year", x="Year",y="Number Of Reviews")
+ggplot(reviews_per_month,aes(x = month,y = num_reviews, fill=month)) + geom_bar(stat = "identity") + labs(title="Number Of Reviews Each Month", x="Month",y="Number Of Reviews") + scale_x_discrete(labels=month.abb)
+ggplot(avg_stars_per_year,aes(x = year,y = avg_stars, fill=year)) + geom_bar(stat = "identity") + labs(title="Average Stars Each Year", x="Year",y="Average Stars")
+ggplot(avg_stars_per_month,aes(x = month,y = avg_stars, fill=month)) + geom_bar(stat = "identity") + labs(title="Average Stars Each Month", x="Month",y="Average Stars") + scale_x_discrete(labels=month.abb)
+par(mfrow=c(1,1))
+
+```
+
+Words being used in a review may provide insights on the star rating of an establishment. Words such as "Recommend" may indicate that the customer has had a positive experience which may lead to them giving a high rating at the establishment whereas words such as "Disgusting" may be used to indicate a bad experience and hence a low rating.
+
+```{r echo=FALSE}
+reviews_low <- review_data_small$text[review_data_small$stars == 1]
+corpus_low <- Corpus(VectorSource(reviews_low))%>%tm_map(tolower)%>%tm_map(removePunctuation)%>%tm_map(removeNumbers)%>%tm_map(removeWords, stopwords("en"))
+corpus_low <- data.frame(text=sapply(corpus_low, as.character), stringsAsFactors=FALSE)
+words <- corpus_low %>%unnest_tokens(word, text)
+word_freqs <- words %>%anti_join(stop_words) %>%count(word, sort=TRUE)
+wordcloud(words = word_freqs$word, freq = word_freqs$n, min.freq = 1,max.words=100, random.order=FALSE, rot.per=0, colors=brewer.pal(8, "Dark2"))
+title(main="Word Cloud for Low Rating (Stars == 1)")
+
+reviews_high <- review_data_small$text[review_data_small$stars == 5]
+corpus_high <- Corpus(VectorSource(reviews_high))%>%tm_map(tolower)%>%tm_map(removePunctuation)%>%tm_map(removeNumbers)%>%tm_map(removeWords, stopwords("en"))
+corpus_high <- data.frame(text=sapply(corpus_high, as.character), stringsAsFactors=FALSE)
+words <- corpus_high %>%unnest_tokens(word, text)
+word_freqs <- words %>%anti_join(stop_words) %>%count(word, sort=TRUE)
+wordcloud(words = word_freqs$word, freq = word_freqs$n, min.freq = 1,max.words=100, random.order=FALSE, rot.per=0, colors=brewer.pal(8, "Dark2"))
+title(main="Word Cloud for High Rating (Stars == 5)")
+```
+
+### Business Data
+
+Correlation heat map for the business dataset
+
+```{r echo=FALSE}
+cor_matrix <- cor(select(business_data, stars, review_count, latitude, longitude))%>%melt()
+ggplot(data=cor_matrix, aes(x = Var1, y = Var2, fill = value)) + geom_tile() + labs(title = "Business Data Correlation Heatmap",x = "Variable 1",y = "Variable 2")
+
+```
+
+City Statistics
+
+```{r echo=FALSE}
+total_reviews_by_city <- business_data %>%group_by(city) %>%summarise(total_reviews = sum(review_count, na.rm = TRUE)) %>%arrange(desc(total_reviews)) %>%head(30)
+five_star_cities <- business_data%>%filter(stars == 5) %>%group_by(city) %>% summarise(total_5_star_reviews = sum(review_count, na.rm = TRUE)) %>%arrange(desc(total_5_star_reviews)) %>%head(15) 
+one_star_cities <- business_data%>%filter(stars == 1) %>%group_by(city) %>% summarise(total_1_star_reviews = sum(review_count, na.rm = TRUE)) %>%arrange(desc(total_1_star_reviews)) %>%head(15)
+ggplot(total_reviews_by_city, aes(x = reorder(city, -total_reviews), y = total_reviews)) +geom_bar(stat = "identity", fill = "green") + labs(title = "Cities with the Most Total Reviews", x = "City", y = "Total Reviews") + theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 0))  
+par(mfrow=c(2,2))
+ggplot(five_star_cities, aes(x = reorder(city, -total_5_star_reviews), y = total_5_star_reviews)) +geom_bar(stat = "identity", fill = "blue") + labs(title = "Cities with the Most 5 Star Ratings", x = "City", y = "Total 5 Star Ratings") + theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 0))  
+ggplot(one_star_cities, aes(x = reorder(city, -total_1_star_reviews), y = total_1_star_reviews)) +geom_bar(stat = "identity", fill = "red") + labs(title = "Cities with the Most 1 Star Ratings", x = "City", y = "Total 1 Star Ratings") + theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 0))  
+par(mfrow=c(1,1))
+```
+
+Business Category Statistics
+
+```{r echo=FALSE}
+total_reviews_by_category<- business_data %>%group_by(categories) %>%summarise(total_reviews = sum(review_count, na.rm = TRUE),avg_stars = mean(stars, na.rm = TRUE)) %>%arrange(desc(total_reviews)) %>%head(30)
+top_avg_stars_categories <- total_reviews_by_category %>% arrange(desc(avg_stars)) %>% head(15)
+bot_avg_stars_categories <- total_reviews_by_category %>% arrange((avg_stars)) %>% head(15)
+ggplot(total_reviews_by_category, aes(x = reorder(categories, -total_reviews), y = total_reviews)) + geom_bar(stat = "identity", fill = "purple") + labs(title = "Most Popular Categories", x = "Category", y = "Total Reviews") + theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+par(mfrow=c(2,2))
+ggplot(top_avg_stars_categories, aes(x = reorder(categories, -avg_stars), y = avg_stars)) + geom_bar(stat = "identity", fill = "blue") + labs(title = "Categories with Highest Average Stars", x = "Category", y = "Average Stars") + theme_minimal() +theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggplot(bot_avg_stars_categories, aes(x = reorder(categories, avg_stars), y = avg_stars)) + geom_bar(stat = "identity", fill = "red") + labs(title = "Categories with Lowest Average Stars", x = "Category", y = "Average Stars") + theme_minimal() +theme(axis.text.x = element_text(angle = 45, hjust = 1))
+par(mfrow=c(1,1))
+```
+
+### User Data
+
+Correlation heat map for the user dataset
+
+```{r echo=FALSE}
+cor_matrix <- cor(select(user_data_small,review_count, useful, funny, cool, average_stars,compliment_hot,compliment_more,compliment_profile,compliment_cute,compliment_list,compliment_note,compliment_plain,compliment_cool,compliment_funny,compliment_writer,compliment_photos))%>%melt()
+ggplot(data=cor_matrix, aes(x = Var1, y = Var2, fill = value)) + geom_tile() + labs(title = "User Data Correlation Heatmap",x = "Variable 1",y = "Variable 2")+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Data Preparation
+```{r include = FALSE}
+cat("\014")  
+rm(list=ls())
+gc()
+setwd("E:/yelp_dataset")
+set.seed(1)
+load('yelp_review_small.Rda')
+load('yelp_user_small.Rda')
+business_data <- readRDS('./yelp_academic_dataset_business.rds')
+```
+The data preparation phase involves merging user_data, business_data and review_data.
+
+```{r echo=TRUE}
+data<-left_join(review_data_small,rename_with(user_data_small,~ ifelse(. != "user_id", paste0("user_", .), .)),by='user_id')%>%left_join(rename_with(business_data,~ ifelse(. != "business_id", paste0("business_", .), .)),'business_id')
+```
+```{r include = FALSE}
+rm(user_data_small)
+rm(review_data_small)
+rm(business_data)
+data[c('business_attributes','business_hours')] <- list(NULL)
+```
+Subsequently, the data is split into training and tests set for model training and evaluation. 
+
+```{r echo=TRUE}
+# Split train, test data
+split <- sample.split(data$stars,SplitRatio=0.8)
+train <- data[split,]
+test <- data[!split,]
+```
+```{r include = FALSE}
+rm(data)
+gc()
+```
+To streamline data cleaning and the feature engineering process, a data pipeline was constructed to create a systematic and reproducible approach to data processing, ensuring consistency in transforming both the training and tests sets, minimising the risk of data leakage and ensuring model generalization. 
+
+Irrelevant columns such as user_id was removed and date-related features were created from the date column in the reviews dataset. This involved extracting the day of the week, year, and month. Efforts were made to create similar date features using user_yelping_since. However, due to a significant discrepancy in the number of unique users between the review and user datasets, this approach resulted in a substantial number of missing values. Consequently, the decision was made to drop the entire user_yelping_since column. 
+
+Factor columns with a large number of unique values such as business_categories was also dropped as the high cardinality would lead to sparse representations, making them less informative for predictive modelling.
+
+Feature engineering was then applied to the text column in the dataset, involving tokenization, filtering for stop words, extracting the top 100 tokens and calculating the term frequency-inverse document frequency (TF-IDF). TF-IDF measures the importance of a term within a document relative to a collection of documents. In this context, a term that occurs a lot in a given review text but rarely in other review text is considered an important term and is given a high score.
+
+In handling numerical columns, it was observed that many columns exhibited a minimum value of 0 and a median of 0, coupled with large extreme values that led to non-zero mean. To mitigate the impact of outliers, imputation was performed using the median values on these numerical columns with missing values.
+
+```{r echo=TRUE}
+recipe <- recipe(~ ., data = train) %>%
+  # Data Cleaning
+  step_rm(user_id, business_id, review_id, user_name, user_elite, user_friends, business_name, business_address, business_postal_code, business_is_open,business_latitude,business_longitude,business_categories,business_city,business_state,user_yelping_since) %>%
+  # Feature Engineering - Date Columns
+  step_mutate(date = as.Date(date))  %>%
+  step_date(date) %>% 
+  step_rm(date) %>%
+  # Feature Engineering - Review Text
+  step_tokenize(text) %>%
+  step_stopwords(text) %>%
+  step_tokenfilter(text, max_tokens = 100) %>%  
+  step_tfidf(text)%>%
+  # Impute Median values for user and review features
+  # Remove missing values rows and zero variance predictors
+  step_impute_median(all_numeric())%>%
+  step_zv(all_predictors())
+```
+```{r include=FALSE}
+prep_recipe <- prep(recipe)
+train<- bake(prep_recipe,new_data = NULL)
+test <- bake(prep_recipe, new_data = test)
+rm(recipe)
+gc()
+```
+
+## Modelling
+
+The initial approach involved fitting a linear regression model as the baseline model since it is a straightforward method to establish a relationship between predictor variables and the target variable.
+
+The residual plot against the predictor variable demonstrated a linear negative relationship, suggesting that the model might not be capturing the underlying patterns in the data adequately. This observation hinted at the potential presence of non-linear relationships between the predictors and the target variable. Furthermore, examining the actual values versus the predicted values showed that the predicted values spanned a range outside the possible values for star ratings (1-5)
+
+```{r include=FALSE}
+set.seed(1)
+lm.fit <- lm(stars~.,data=train)
+summary(lm.fit)
+```
+```{r}
+par(mfrow=c(2,2))
+plot(lm.fit$residuals)
+plot(predict(lm.fit),residuals(lm.fit))
+plot(predict(lm.fit),rstudent(lm.fit))
+plot(train$stars,predict(lm.fit))
+par(mfrow=c(1,1))
+```
+
+Decision Trees could potentially solve these problems as it is a non-parametric model that accommodates non-linear relationships between the predictor variable and target variable. As decision trees make splits based on the overall structure of the data, the model is also less sensitive to outliers. Additionally, predicted values of a decision tree model are determined by the leaf nodes which enforces constraints on the range of the target variable. The model also has the added benefit of being interpretable and visualisable before progressing on towards more complex models such as the Random Forest model. K-Fold Cross Validation was employed for hyperparameter tuning to enhance the model's performance.
+```{r include=FALSE}
+set.seed(1)
+```
+```{r echo=TRUE}
+decision_tree_optimized <- rpart(stars~.,data=train,method='anova',cp=0.0005)
+rpart.plot(decision_tree_optimized)
+```
+
+By building multiple decision trees using different subsets of data and combining the individual predictions, the Random Forest model avoids overfitting and improves generalisation.
+
+```{r echo=TRUE}
+# R file had num.trees=500, but knitting takes too long
+fit_rf <- ranger(stars~.,data=train, num.trees = 100 ,verbose = FALSE,seed = 1)
+```
+
+## Evaluation
+Mean Squared Error (MSE) on training data:
+
+Linear Regression:
+```{r}
+preds<-predict(lm.fit,newdata = train)
+plot(train$stars,preds)
+print(mean((train$stars - preds)^2))
+```
+
+Decision-Tree (with K-Fold): 
+```{r}
+preds<-predict(decision_tree_optimized,newdata = train)
+plot(train$stars,preds)
+print(mean((train$stars - preds)^2))
+```
+
+Random Forest: 
+```{r}
+preds<-predict(fit_rf,data = train)$predictions
+plot(train$stars,preds)
+print(mean((train$stars - preds)^2))
+```
+
+
+Mean Squared Error (MSE) on test data:
+
+Linear Regression: 
+```{r}
+preds<-predict(lm.fit,newdata = test)
+plot(test$stars,preds)
+print(mean((test$stars - preds)^2))
+```
+
+Decision-Tree (with K-Fold): 
+```{r}
+preds<-predict(decision_tree_optimized,newdata = test)
+plot(test$stars,preds)
+print(mean((test$stars - preds)^2))
+```
+
+Random Forest: 
+```{r}
+preds<-predict(fit_rf,data = test)$predictions
+plot(test$stars,preds)
+print(mean((test$stars - preds)^2))
+```
+
+## Review
+As expected, the Random Forest model outperforms all the other models despite overfitting, as evidenced by the large discrepancy between train and test MSE. By looking at the summary statistics of the linear regression as well as visualizing the decision tree, it is observed that business_stars is a valid predictor of the stars  given in the review. In a real-world setting, this would have led to a problem of data leakage as we have used current data "business_stars" to predict past_data "stars". A better approach would be to filter for past reviews for the business at the time at which the review was written and take the average stars from that filtered set as the business_stars predictor.
+
+## References
+James, G., Witten, D., Hastie, T., & Tibshirani, R. (2021). *An Introduction to Statistical Learning.* Springer.
+
+Wirth, R., & Hipp, J. (2000). *CRISP-DM: Towards a Standard Process Model for Data.* University of Bologna.
+
+Yelp. (2023). *Yelp Open Dataset.* Retrieved from Yelp: https://www.yelp.com/dataset
